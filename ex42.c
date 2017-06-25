@@ -24,6 +24,8 @@ typedef struct {
     int qSize;
     int front;
     int end;
+    int remaining;
+    int items;
 } Queue;
 
 typedef struct {
@@ -68,6 +70,8 @@ void initQueue(int size) {
     jobQueue.qSize = size;
     jobQueue.front = 0;
     jobQueue.end = 0;
+    jobQueue.items = 0;
+    jobQueue.remaining = 0;
 }
 
 Boolean enqueue(char mission) {
@@ -88,6 +92,7 @@ Boolean enqueue(char mission) {
         }
     }
 
+    jobQueue.items++;
     // enqueue the mission
     jobQueue.queue[jobQueue.end++] = mission;
 
@@ -116,6 +121,10 @@ char dequeue() {
         jobQueue.end = 0;
         c = FALSE;
     } else {
+        jobQueue.items--;
+
+        if (shutDown) jobQueue.remaining--;
+
         // return first in line
         c = jobQueue.queue[jobQueue.front++];
     }
@@ -184,7 +193,7 @@ void writeToFile() {
     // thread id
     temp = (unsigned int) pthread_self();
 
-    sprintf(buffer, "thread identifier is %d and internal_count is %d\n", temp, internal_count);
+    sprintf(buffer, "thread identifier is %u and internal_count is %d\n", temp, internal_count);
 
     // write to file
     if ((write(locks.fd, buffer, strlen(buffer))) < 0) {
@@ -238,6 +247,7 @@ void* mainThreadFunction(void * args) {
                 increment(5);
                 break;
             case 'f':
+                writeToFile();
                 break;
             default:
                 break;
@@ -332,12 +342,85 @@ void lock(int semid) {
     }
 }
 
-void endImidieatly() {
+void waitBeforeEnding(char *sharedMemory) {
+    int i;
 
+    // how much jobs to do before ending
+    jobQueue.remaining = jobQueue.items;
+
+    // wait until remaining job are 0
+    while (jobQueue.remaining > 0) {
+        microWait();
+    }
+
+    // block thread from receiving new jobs
+    shutDown = TRUE;
+
+    // wait for all threads
+    for (i = 0; i < ARR_SIZE; ++i) {
+        if ((pthread_join(threads[i], NULL)) < 0) {
+            exitWithError("join error");
+        }
+    }
+
+    // main thread
+    writeToFile();
+
+    // detach from the shared memory
+    if ((shmdt(sharedMemory)) <0 ) {
+        exitWithError("shmdt error");
+    }
 }
 
-void waitBeforeEnding() {
+void endImmediately() {
+    int i;
 
+    printf("endImmediately\n");
+    // end all threads
+    for (i = 0; i < ARR_SIZE; ++i) {
+        if ((pthread_cancel(threads[i])) < 0) {
+            exitWithError("cancel error");
+        }
+    }
+    printf("end of endImmediately");
+
+    // main thread
+    writeToFile();
+}
+
+void freeResources(int read, int write, int shmid) {
+    union semun semUnion;
+    semUnion.val = 1;
+
+    // free read
+    if ((semctl(read, 0, IPC_RMID, semUnion)) < 0) {
+        exitWithError("semctl error");
+    }
+
+    // free write
+    if ((semctl(write, 0, IPC_RMID, semUnion)) < 0) {
+        exitWithError("semctl error");
+    }
+
+    // free mutex
+    if ((pthread_mutex_destroy(&(locks.fileLock))) < 0) {
+        exitWithError("destroy error");
+    }
+
+    // free mutex
+    if ((pthread_mutex_destroy(&(locks.internalLock))) < 0) {
+        exitWithError("destroy error");
+    }
+
+    // free mutex
+    if ((pthread_mutex_destroy(&(locks.queueLock))) < 0) {
+        exitWithError("destroy error");
+    }
+
+    // remove shared memory
+    if ((shmctl(shmid, IPC_RMID, NULL)) < 0) {
+        exitWithError("shmctl error");
+    }
 }
 
 int main(int argc, char **argv) {
@@ -403,10 +486,12 @@ int main(int argc, char **argv) {
         // get the task
         task = sharedMemory[0];
         if (task == 'h' || task == 'H') {
-            endImidieatly();
+            waitBeforeEnding(sharedMemory);
+            freeResources(sem_read_id, sem_write_id, shmid);
             break;
         } else if (task == 'g' || task == 'G') {
-            waitBeforeEnding();
+            endImmediately();
+            freeResources(sem_read_id, sem_write_id, shmid);
             break;
         } else {
             // add the task to the job queue

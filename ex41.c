@@ -111,11 +111,24 @@ int main(int argc, char **argv) {
         lock(sem_write_id);
         printf("after lock\n");
         scanf("\n%c", &task);
-        sharedMemory[0] = task;
-        printf("wrote\n");
+        if (task != 'i') {
+            sharedMemory[0] = task;
+            printf("wrote\n");
+
+            if (task == 'h' || task == 'H' || task == 'g' || task == 'G') {
+                // clean resources?
+                unlock(sem_read_id);
+                break;
+            }
+        }
         unlock(sem_read_id);
 
-    } while (task != 'i');
+    } while (1);
+
+    // detach from the shared memory
+    if ((shmdt(sharedMemory)) <0 ) {
+        exitWithError("shmdt error");
+    }
 
 
     return 0;
